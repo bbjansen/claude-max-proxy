@@ -1,0 +1,20 @@
+{
+  "name": "@claude-max-proxy/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "jose": "5.2.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20240314.0",
+    "typescript": "5.3.3",
+    "vitest": "1.4.0",
+    "wrangler": "3.34.2"
+  }
+}

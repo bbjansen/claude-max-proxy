@@ -1,0 +1,13 @@
+{
+  "name": "claude-max-proxy",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "agent",
+    "worker"
+  ],
+  "scripts": {
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present"
+  }
+}
