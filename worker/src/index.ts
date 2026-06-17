@@ -6,6 +6,10 @@ export interface Env {
   ACCESS_AUD: string;
   TUNNEL_ACCESS_CLIENT_ID: string;
   TUNNEL_ACCESS_CLIENT_SECRET: string;
+  // Optional shared-bearer fallback for inbound auth, used when CF Access is
+  // not (yet) configured in front of the Worker. When CF Access is in place,
+  // requests carry Cf-Access-Jwt-Assertion and this is unused.
+  PROXY_KEY?: string;
 }
 
 const HOP_BY_HOP = new Set([
@@ -60,6 +64,13 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let result = 0;
+  for (let i = 0; i < a.length; i++) result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return result === 0;
+}
+
 const handler = {
   __skipJwtVerify: false as boolean,
 
@@ -69,12 +80,18 @@ const handler = {
       return jsonResponse(404, { error: { type: "not_found", message: "POST /v1/messages only" } });
     }
 
-    const jwt = req.headers.get("cf-access-jwt-assertion");
     if (!handler.__skipJwtVerify) {
-      if (!jwt) return jsonResponse(403, { error: { type: "forbidden", message: "missing access jwt" } });
-      try { await verifyAccessJwt(jwt, env); }
-      catch (e) {
-        return jsonResponse(403, { error: { type: "forbidden", message: `jwt invalid: ${(e as Error).message}` } });
+      const jwt = req.headers.get("cf-access-jwt-assertion");
+      const bearer = req.headers.get("authorization");
+      const expectedBearer = env.PROXY_KEY ? `Bearer ${env.PROXY_KEY}` : null;
+      const bearerOk = expectedBearer !== null && bearer !== null && timingSafeEqual(bearer, expectedBearer);
+      if (jwt) {
+        try { await verifyAccessJwt(jwt, env); }
+        catch (e) {
+          return jsonResponse(403, { error: { type: "forbidden", message: `jwt invalid: ${(e as Error).message}` } });
+        }
+      } else if (!bearerOk) {
+        return jsonResponse(403, { error: { type: "forbidden", message: "missing access jwt or proxy bearer" } });
       }
     }
 
@@ -82,8 +99,10 @@ const handler = {
     for (const [k, v] of req.headers.entries()) {
       if (FORWARD_HEADERS.has(k.toLowerCase())) fwdHeaders.set(k, v);
     }
-    fwdHeaders.set("cf-access-client-id", env.TUNNEL_ACCESS_CLIENT_ID);
-    fwdHeaders.set("cf-access-client-secret", env.TUNNEL_ACCESS_CLIENT_SECRET);
+    if (env.TUNNEL_ACCESS_CLIENT_ID && env.TUNNEL_ACCESS_CLIENT_SECRET) {
+      fwdHeaders.set("cf-access-client-id", env.TUNNEL_ACCESS_CLIENT_ID);
+      fwdHeaders.set("cf-access-client-secret", env.TUNNEL_ACCESS_CLIENT_SECRET);
+    }
 
     let upstream: Awaited<ReturnType<typeof fetch>>;
     try {

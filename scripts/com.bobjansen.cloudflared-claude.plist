@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.bobjansen.cloudflared-claude</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/cloudflared</string>
+    <string>--config</string>
+    <string>/Users/bob.jansen/.cloudflared/config.yml</string>
+    <string>tunnel</string>
+    <string>run</string>
+    <string>claude-max-proxy</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/Users/bob.jansen</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key>
+  <string>/Users/bob.jansen/Library/Logs/cloudflared-claude.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/bob.jansen/Library/Logs/cloudflared-claude.err.log</string>
+</dict>
+</plist>
