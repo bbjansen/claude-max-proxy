@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "claude-max-proxy",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": {
+    "TUNNEL_HOSTNAME": "claude-agent.internal.bbj.systems",
+    "ACCESS_TEAM_DOMAIN": "REPLACE_WITH_TEAM.cloudflareaccess.com"
+  }
+  // Secrets (set via `wrangler secret put`):
+  //   ACCESS_AUD                   — Application Audience tag of the Worker's CF Access app
+  //   TUNNEL_ACCESS_CLIENT_ID      — service token client ID for the Tunnel hostname
+  //   TUNNEL_ACCESS_CLIENT_SECRET  — service token secret for the Tunnel hostname
+}
