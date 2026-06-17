@@ -1,0 +1,6 @@
+tunnel: claude-max-proxy
+credentials-file: /Users/<USER>/.cloudflared/<TUNNEL_UUID>.json
+ingress:
+  - hostname: claude-agent.internal.<ZONE>
+    service: http://localhost:8787
+  - service: http_status:404

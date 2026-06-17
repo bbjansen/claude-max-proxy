@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.bobjansen.claude-max-proxy</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/Users/bob.jansen/projects/claude-max-proxy/agent/dist/index.js</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>/Users/bob.jansen</string>
+    <key>PORT</key><string>8787</string>
+    <key>HOST</key><string>127.0.0.1</string>
+    <key>PATH</key><string>/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key>
+  <string>/Users/bob.jansen/Library/Logs/claude-max-proxy.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/bob.jansen/Library/Logs/claude-max-proxy.err.log</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/bob.jansen/projects/claude-max-proxy/agent</string>
+</dict>
+</plist>
