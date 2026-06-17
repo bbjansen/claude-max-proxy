@@ -2,6 +2,7 @@ import * as jose from "jose";
 import {
   openaiToAnthropic,
   anthropicToOpenai,
+  anthropicErrorToOpenai,
   anthropicSseToOpenaiSse,
   modelsList,
   type OpenAIChatRequest,
@@ -31,20 +32,15 @@ const HOP_BY_HOP = new Set([
   "upgrade",
   "content-encoding",
   "content-length",
-  "host",
-  "cf-connecting-ip",
-  "cf-ipcountry",
-  "cf-ray",
-  "cf-visitor",
-  "cf-access-jwt-assertion",
-  "cf-access-authenticated-user-email",
-  "cookie",
 ]);
 
+// Request headers we are willing to forward to the tunnel. `anthropic-version`
+// is intentionally NOT here: the agent always pins its own version on the
+// upstream call, so forwarding a client-supplied value would be silently
+// overridden and gives a false sense of control.
 const FORWARD_HEADERS = new Set([
   "accept",
   "content-type",
-  "anthropic-version",
 ]);
 
 const jwksCache = new Map<string, ReturnType<typeof jose.createRemoteJWKSet>>();
@@ -79,18 +75,33 @@ function timingSafeEqual(a: string, b: string): boolean {
   return result === 0;
 }
 
+// Per RFC 7235 §2.1 auth schemes are case-insensitive. Accept any casing of
+// `Bearer` and tolerate extra inter-token whitespace.
+function extractBearerCredential(headerValue: string | null): string | null {
+  if (headerValue == null) return null;
+  const m = /^\s*bearer\s+(\S.*?)\s*$/i.exec(headerValue);
+  return m ? m[1]! : null;
+}
+
 async function authorize(req: Request, env: Env, skip: boolean): Promise<Response | null> {
   if (skip) return null;
   const jwt = req.headers.get("cf-access-jwt-assertion");
-  const bearer = req.headers.get("authorization");
-  const expectedBearer = env.PROXY_KEY ? `Bearer ${env.PROXY_KEY}` : null;
-  const bearerOk = expectedBearer !== null && bearer !== null && timingSafeEqual(bearer, expectedBearer);
   if (jwt) {
     try { await verifyAccessJwt(jwt, env); return null; }
     catch (e) { return jsonResponse(403, { error: { type: "forbidden", message: `jwt invalid: ${(e as Error).message}` } }); }
   }
+  const presented = extractBearerCredential(req.headers.get("authorization"));
+  const expected = env.PROXY_KEY ?? null;
+  const bearerOk = expected !== null && presented !== null && timingSafeEqual(presented, expected);
   if (!bearerOk) return jsonResponse(403, { error: { type: "forbidden", message: "missing access jwt or proxy bearer" } });
   return null;
+}
+
+function applyTunnelAuth(headers: Headers, env: Env): void {
+  if (env.TUNNEL_ACCESS_CLIENT_ID && env.TUNNEL_ACCESS_CLIENT_SECRET) {
+    headers.set("cf-access-client-id", env.TUNNEL_ACCESS_CLIENT_ID);
+    headers.set("cf-access-client-secret", env.TUNNEL_ACCESS_CLIENT_SECRET);
+  }
 }
 
 function buildTunnelHeaders(req: Request, env: Env): Headers {
@@ -98,10 +109,7 @@ function buildTunnelHeaders(req: Request, env: Env): Headers {
   for (const [k, v] of req.headers.entries()) {
     if (FORWARD_HEADERS.has(k.toLowerCase())) fwd.set(k, v);
   }
-  if (env.TUNNEL_ACCESS_CLIENT_ID && env.TUNNEL_ACCESS_CLIENT_SECRET) {
-    fwd.set("cf-access-client-id", env.TUNNEL_ACCESS_CLIENT_ID);
-    fwd.set("cf-access-client-secret", env.TUNNEL_ACCESS_CLIENT_SECRET);
-  }
+  applyTunnelAuth(fwd, env);
   return fwd;
 }
 
@@ -137,23 +145,35 @@ async function handleChatCompletions(req: Request, env: Env): Promise<Response> 
   try { openaiReq = await req.json() as OpenAIChatRequest; }
   catch { return jsonResponse(400, { error: { type: "invalid_request_error", message: "body is not valid JSON" } }); }
 
-  const anthropicBody = openaiToAnthropic(openaiReq);
+  const translation = openaiToAnthropic(openaiReq);
+  if (!translation.ok) {
+    return jsonResponse(translation.error.status, {
+      error: {
+        message: translation.error.message,
+        type: translation.error.type,
+        code: "invalid_request",
+        param: null,
+      },
+    });
+  }
+  const anthropicBody = translation.body;
   const stream = anthropicBody.stream === true;
 
   const headers = new Headers();
   headers.set("content-type", "application/json");
   headers.set("accept", stream ? "text/event-stream" : "application/json");
-  if (env.TUNNEL_ACCESS_CLIENT_ID && env.TUNNEL_ACCESS_CLIENT_SECRET) {
-    headers.set("cf-access-client-id", env.TUNNEL_ACCESS_CLIENT_ID);
-    headers.set("cf-access-client-secret", env.TUNNEL_ACCESS_CLIENT_SECRET);
-  }
+  applyTunnelAuth(headers, env);
 
   const upstream = await callTunnel(env, JSON.stringify(anthropicBody), headers);
   if ("error" in upstream) return jsonResponse(502, { error: { type: "upstream_unavailable", message: upstream.error } });
 
   if (!upstream.ok) {
-    // Forward Anthropic errors verbatim — clients can decode either format.
-    return passThroughResponse(upstream);
+    // Translate Anthropic error envelope to OpenAI shape so SDK error classes
+    // (RateLimitError, AuthenticationError, BadRequestError) dispatch correctly.
+    let anthropicBodyJson: unknown = null;
+    try { anthropicBodyJson = await upstream.json(); }
+    catch { /* upstream returned non-JSON; fall through with null */ }
+    return jsonResponse(upstream.status, anthropicErrorToOpenai(upstream.status, anthropicBodyJson));
   }
 
   const nowSec = Math.floor(Date.now() / 1000);
@@ -171,7 +191,11 @@ async function handleChatCompletions(req: Request, env: Env): Promise<Response> 
     );
   }
 
-  const anthResp = await upstream.json() as AnthropicMessageResponse;
+  let anthResp: AnthropicMessageResponse;
+  try { anthResp = await upstream.json() as AnthropicMessageResponse; }
+  catch (e) {
+    return jsonResponse(502, anthropicErrorToOpenai(502, { error: { type: "api_error", message: `upstream returned non-JSON: ${(e as Error).message}` } }));
+  }
   return jsonResponse(200, anthropicToOpenai(anthResp, nowSec));
 }
 

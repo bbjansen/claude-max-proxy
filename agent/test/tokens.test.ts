@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { TokenManager } from "../src/tokens.js";
+import { TokenManager, PlatformRefreshClient } from "../src/tokens.js";
 import type { CredentialStore, OAuthCredential, RefreshClient } from "../src/types.js";
 
 const baseCred: OAuthCredential = {
@@ -119,5 +119,64 @@ describe("TokenManager", () => {
     await tm.getAccessToken();
     expect(await tm.forceRefresh()).toBe("sk-ant-oat01-FORCED");
     expect(refresher.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("PlatformRefreshClient.refresh tolerates a response with no refresh_token and reuses the old one (RFC 6749 §6)", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      access_token: "sk-ant-oat01-FRESH",
+      expires_in: 3600,
+      // refresh_token deliberately omitted
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    try {
+      const client = new PlatformRefreshClient();
+      const result = await client.refresh("sk-ant-ort01-OLD");
+      expect(result.accessToken).toBe("sk-ant-oat01-FRESH");
+      expect(result.refreshToken).toBe("sk-ant-ort01-OLD");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("forceRefresh never silently joins an abandoning non-forced refresh — refresher is always called", async () => {
+    // Simulate: a non-forced refresh would abandon (its re-read inside the
+    // lock shows an externally-rotated fresh credential), while a forced
+    // refresh is fired concurrently because the caller saw a 401. The
+    // pre-fix code joined them and called refresher.refresh ZERO times,
+    // causing the caller to retry with the already-invalid externally-fresh
+    // token. The fix: forceRefresh must always cause refresher.refresh to
+    // run, regardless of any non-forced refresh in flight.
+    const stale = { ...baseCred, expiresAt: now + 30_000 };
+    const externallyRefreshed: OAuthCredential = {
+      ...baseCred,
+      accessToken: "sk-ant-oat01-EXTERNAL",
+      refreshToken: "sk-ant-ort01-EXTERNAL",
+      expiresAt: now + 8 * 3_600_000,
+    };
+    const trulyForced: OAuthCredential = {
+      ...baseCred,
+      accessToken: "sk-ant-oat01-FORCED",
+      refreshToken: "sk-ant-ort01-FORCED",
+      expiresAt: now + 8 * 3_600_000,
+    };
+    let calls = 0;
+    const store: CredentialStore = {
+      read: vi.fn(async () => (calls++ === 0 ? stale : externallyRefreshed)),
+      write: vi.fn(async () => {}),
+    };
+    const refresher: RefreshClient = {
+      refresh: vi.fn(async () => trulyForced),
+    };
+    const tm = new TokenManager(store, refresher, noopLock(), clock);
+
+    const [, b] = await Promise.all([
+      tm.getAccessToken(),     // non-forced — may abandon via re-read
+      tm.forceRefresh(),        // forced — must actually call refresher.refresh
+    ]);
+    // forceRefresh's returned token must be the one refresher produced
+    // (not the abandoned re-read result).
+    expect(b).toBe("sk-ant-oat01-FORCED");
+    expect(refresher.refresh).toHaveBeenCalled();
   });
 });

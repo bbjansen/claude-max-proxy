@@ -13,7 +13,12 @@ const DEFAULT_EXPIRES_IN_S = 8 * 3600;
 
 export class TokenManager {
   private cached: OAuthCredential | null = null;
-  private inflight: Promise<OAuthCredential> | null = null;
+  // Two inflight slots so a forced refresh never joins a non-forced refresh
+  // that might decide to abandon (the non-forced path returns early when the
+  // store re-read shows a still-fresh credential). A non-forced caller can
+  // join either slot — a forced refresh satisfies both.
+  private inflightForced: Promise<OAuthCredential> | null = null;
+  private inflightAny: Promise<OAuthCredential> | null = null;
 
   constructor(
     private readonly store: CredentialStore,
@@ -37,10 +42,15 @@ export class TokenManager {
   }
 
   private async refreshShared(force: boolean): Promise<OAuthCredential> {
-    if (this.inflight) return this.inflight;
-    this.inflight = this.refreshLocked(force);
-    try { return await this.inflight; }
-    finally { this.inflight = null; }
+    if (this.inflightForced) return this.inflightForced;
+    if (!force && this.inflightAny) return this.inflightAny;
+
+    const p = this.refreshLocked(force);
+    if (force) this.inflightForced = p; else this.inflightAny = p;
+    try { return await p; }
+    finally {
+      if (force) this.inflightForced = null; else this.inflightAny = null;
+    }
   }
 
   private async refreshLocked(force: boolean): Promise<OAuthCredential> {
@@ -66,7 +76,7 @@ export class KeychainStore implements CredentialStore {
 
   async read(): Promise<OAuthCredential | null> {
     const { stdout, code } = await runSecurity(
-      ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", this.account, "-w"]
+      ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", this.account, "-w"],
     );
     if (code === 44 || code === 51) return null;
     if (code !== 0) throw new Error(`security read failed (exit ${code})`);
@@ -82,10 +92,15 @@ export class KeychainStore implements CredentialStore {
         scopes: cred.scopes,
       },
     });
-    const { code } = await runSecurity(
-      ["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", this.account, "-w", json]
+    // Pipe the secret via stdin instead of `-w <json>` so it never appears in
+    // argv (visible to `ps`, /proc/<pid>/cmdline, audit logs).
+    // `security add-generic-password -w` with no value reads the password from
+    // a TTY; when stdin is a pipe, it reads from there.
+    const { code, stderr } = await runSecurity(
+      ["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", this.account, "-w"],
+      json,
     );
-    if (code !== 0) throw new Error(`security write failed (exit ${code})`);
+    if (code !== 0) throw new Error(`security write failed (exit ${code}): ${stderr.slice(0, 200)}`);
   }
 }
 
@@ -112,7 +127,17 @@ export class FileCredentialStore implements CredentialStore {
       },
     }, null, 2);
     await fs.mkdir(path.dirname(this.file), { recursive: true });
-    await fs.writeFile(this.file, json, { mode: 0o600 });
+    // Atomic write: pid-suffixed temp file in the same directory, then rename
+    // over the target. Avoids torn reads when interactive Claude Code reads the
+    // file concurrently or the process is killed mid-write.
+    const tmp = `${this.file}.tmp.${process.pid}`;
+    try {
+      await fs.writeFile(tmp, json, { mode: 0o600 });
+      await fs.rename(tmp, this.file);
+    } catch (e) {
+      await fs.unlink(tmp).catch(() => {});
+      throw e;
+    }
   }
 }
 
@@ -151,14 +176,18 @@ export class PlatformRefreshClient implements RefreshClient {
       throw new Error(`refresh ${res.status}: ${body.slice(0, 200)}`);
     }
     const json = await res.json() as Record<string, unknown>;
-    if (typeof json.access_token !== "string" || typeof json.refresh_token !== "string") {
-      throw new Error("refresh response missing tokens");
+    if (typeof json.access_token !== "string") {
+      throw new Error("refresh response missing access_token");
     }
+    // RFC 6749 §6: refresh_token in the response is OPTIONAL. If the server
+    // omits it, the old refresh token remains valid — reuse it rather than
+    // breaking the chain.
+    const newRefreshToken = typeof json.refresh_token === "string" ? json.refresh_token : refreshToken;
     const expiresIn = typeof json.expires_in === "number" ? json.expires_in : DEFAULT_EXPIRES_IN_S;
     const scope = typeof json.scope === "string" ? json.scope : "";
     return {
       accessToken: json.access_token,
-      refreshToken: json.refresh_token,
+      refreshToken: newRefreshToken,
       expiresAt: Date.now() + expiresIn * 1000,
       scopes: scope.split(" ").filter(Boolean),
     };
@@ -178,13 +207,18 @@ export function makeFileLock(filePath: string): AcquireLock {
 
 interface SecurityResult { stdout: string; stderr: string; code: number; }
 
-function runSecurity(args: string[]): Promise<SecurityResult> {
+function runSecurity(args: string[], stdin?: string): Promise<SecurityResult> {
   return new Promise((resolve, reject) => {
-    const proc = spawn("security", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const inMode = stdin == null ? "ignore" : "pipe";
+    const proc = spawn("security", args, { stdio: [inMode, "pipe", "pipe"] });
     let stdout = ""; let stderr = "";
-    proc.stdout.on("data", (b) => { stdout += b.toString(); });
-    proc.stderr.on("data", (b) => { stderr += b.toString(); });
+    proc.stdout?.on("data", (b) => { stdout += b.toString(); });
+    proc.stderr?.on("data", (b) => { stderr += b.toString(); });
     proc.on("error", reject);
     proc.on("close", (code) => resolve({ stdout, stderr, code: code ?? -1 }));
+    if (stdin != null && proc.stdin) {
+      proc.stdin.write(stdin);
+      proc.stdin.end();
+    }
   });
 }

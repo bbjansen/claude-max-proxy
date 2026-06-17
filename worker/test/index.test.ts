@@ -93,6 +93,91 @@ describe("worker routing", () => {
     expect(body.error.message).toMatch(/Anthropic does not provide embeddings/);
   });
 
+  it("accepts case-insensitive Bearer scheme and tolerates extra whitespace", async () => {
+    (worker as unknown as { __skipJwtVerify: boolean }).__skipJwtVerify = false;
+    const env = { ...ENV_BASE, PROXY_KEY: "secret-key-123" };
+    fetchMock.mockResolvedValueOnce(new Response("hello", { status: 200 }));
+
+    for (const auth of ["Bearer secret-key-123", "bearer secret-key-123", "BEARER  secret-key-123"]) {
+      fetchMock.mockResolvedValueOnce(new Response("hello", { status: 200 }));
+      const req = new Request("https://w.example.com/v1/messages", {
+        method: "POST",
+        headers: { "authorization": auth, "content-type": "application/json" },
+        body: "{}",
+      });
+      const res = await worker.fetch(req, env as never, makeCtx());
+      expect(res.status, `auth=${auth}`).toBe(200);
+    }
+    (worker as unknown as { __skipJwtVerify: boolean }).__skipJwtVerify = true;
+  });
+
+  it("rejects a malformed Authorization header (no scheme)", async () => {
+    (worker as unknown as { __skipJwtVerify: boolean }).__skipJwtVerify = false;
+    const env = { ...ENV_BASE, PROXY_KEY: "secret-key-123" };
+    const req = new Request("https://w.example.com/v1/messages", {
+      method: "POST",
+      headers: { "authorization": "secret-key-123", "content-type": "application/json" },
+      body: "{}",
+    });
+    const res = await worker.fetch(req, env as never, makeCtx());
+    expect(res.status).toBe(403);
+    (worker as unknown as { __skipJwtVerify: boolean }).__skipJwtVerify = true;
+  });
+
+  it("returns 400 in OpenAI shape when /v1/chat/completions input fails translation", async () => {
+    const req = new Request("https://w.example.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5",
+        messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "x" } }] }],
+      }),
+    });
+    const res = await worker.fetch(req, ENV_BASE as never, makeCtx());
+    expect(res.status).toBe(400);
+    const body = await res.json() as { error: { type: string; message: string } };
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(body.error.message).toMatch(/image_url/);
+  });
+
+  it("translates Anthropic 429 rate_limit_error into OpenAI error shape on /v1/chat/completions", async () => {
+    fetchMock.mockResolvedValueOnce(new Response(
+      JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "Too many" } }),
+      { status: 429, headers: { "content-type": "application/json" } },
+    ));
+    const req = new Request("https://w.example.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5",
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    });
+    const res = await worker.fetch(req, ENV_BASE as never, makeCtx());
+    expect(res.status).toBe(429);
+    const body = await res.json() as { error: { type: string; message: string; code: string } };
+    expect(body.error.type).toBe("rate_limit_error");
+    expect(body.error.code).toBe("rate_limit_exceeded");
+    expect(body.error.message).toBe("Too many");
+  });
+
+  it("does NOT forward client-supplied anthropic-version (agent owns it)", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("ok", { status: 200 }));
+    const req = new Request("https://w.example.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "cf-access-jwt-assertion": "stub",
+        "content-type": "application/json",
+        "anthropic-version": "1999-12-31",
+      },
+      body: "{}",
+    });
+    await worker.fetch(req, ENV_BASE as never, makeCtx());
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    const h = new Headers(init.headers as HeadersInit);
+    expect(h.get("anthropic-version")).toBeNull();
+  });
+
   it("translates POST /v1/chat/completions non-streaming and forwards to tunnel as /v1/messages", async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       id: "msg_abc", type: "message", role: "assistant", model: "claude-haiku-4-5",
