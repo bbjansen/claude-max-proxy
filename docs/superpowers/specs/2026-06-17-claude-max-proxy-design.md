@@ -2,7 +2,6 @@
 
 **Date:** 2026-06-17
 **Status:** Approved (design)
-**Owner:** bob.jansen
 
 ## Problem
 
