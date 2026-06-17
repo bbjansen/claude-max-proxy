@@ -1,4 +1,12 @@
 import * as jose from "jose";
+import {
+  openaiToAnthropic,
+  anthropicToOpenai,
+  anthropicSseToOpenaiSse,
+  modelsList,
+  type OpenAIChatRequest,
+  type AnthropicMessageResponse,
+} from "./openai-shim.js";
 
 export interface Env {
   TUNNEL_HOSTNAME: string;
@@ -71,59 +79,143 @@ function timingSafeEqual(a: string, b: string): boolean {
   return result === 0;
 }
 
+async function authorize(req: Request, env: Env, skip: boolean): Promise<Response | null> {
+  if (skip) return null;
+  const jwt = req.headers.get("cf-access-jwt-assertion");
+  const bearer = req.headers.get("authorization");
+  const expectedBearer = env.PROXY_KEY ? `Bearer ${env.PROXY_KEY}` : null;
+  const bearerOk = expectedBearer !== null && bearer !== null && timingSafeEqual(bearer, expectedBearer);
+  if (jwt) {
+    try { await verifyAccessJwt(jwt, env); return null; }
+    catch (e) { return jsonResponse(403, { error: { type: "forbidden", message: `jwt invalid: ${(e as Error).message}` } }); }
+  }
+  if (!bearerOk) return jsonResponse(403, { error: { type: "forbidden", message: "missing access jwt or proxy bearer" } });
+  return null;
+}
+
+function buildTunnelHeaders(req: Request, env: Env): Headers {
+  const fwd = new Headers();
+  for (const [k, v] of req.headers.entries()) {
+    if (FORWARD_HEADERS.has(k.toLowerCase())) fwd.set(k, v);
+  }
+  if (env.TUNNEL_ACCESS_CLIENT_ID && env.TUNNEL_ACCESS_CLIENT_SECRET) {
+    fwd.set("cf-access-client-id", env.TUNNEL_ACCESS_CLIENT_ID);
+    fwd.set("cf-access-client-secret", env.TUNNEL_ACCESS_CLIENT_SECRET);
+  }
+  return fwd;
+}
+
+async function callTunnel(env: Env, body: BodyInit | null, headers: Headers): Promise<Awaited<ReturnType<typeof fetch>> | { error: string }> {
+  try {
+    return await fetch(`https://${env.TUNNEL_HOSTNAME}/v1/messages`, { method: "POST", headers, body });
+  } catch (e) {
+    return { error: (e as Error).message };
+  }
+}
+
+function passThroughResponse(upstream: Awaited<ReturnType<typeof fetch>>): Response {
+  const outHeaders = new Headers();
+  for (const [k, v] of upstream.headers.entries()) {
+    if (HOP_BY_HOP.has(k.toLowerCase())) continue;
+    outHeaders.set(k, v);
+  }
+  return new Response(
+    upstream.body as unknown as ReadableStream<Uint8Array> | null,
+    { status: upstream.status, headers: outHeaders },
+  );
+}
+
+async function handleAnthropicMessages(req: Request, env: Env): Promise<Response> {
+  const headers = buildTunnelHeaders(req, env);
+  const upstream = await callTunnel(env, req.body, headers);
+  if ("error" in upstream) return jsonResponse(502, { error: { type: "upstream_unavailable", message: upstream.error } });
+  return passThroughResponse(upstream);
+}
+
+async function handleChatCompletions(req: Request, env: Env): Promise<Response> {
+  let openaiReq: OpenAIChatRequest;
+  try { openaiReq = await req.json() as OpenAIChatRequest; }
+  catch { return jsonResponse(400, { error: { type: "invalid_request_error", message: "body is not valid JSON" } }); }
+
+  const anthropicBody = openaiToAnthropic(openaiReq);
+  const stream = anthropicBody.stream === true;
+
+  const headers = new Headers();
+  headers.set("content-type", "application/json");
+  headers.set("accept", stream ? "text/event-stream" : "application/json");
+  if (env.TUNNEL_ACCESS_CLIENT_ID && env.TUNNEL_ACCESS_CLIENT_SECRET) {
+    headers.set("cf-access-client-id", env.TUNNEL_ACCESS_CLIENT_ID);
+    headers.set("cf-access-client-secret", env.TUNNEL_ACCESS_CLIENT_SECRET);
+  }
+
+  const upstream = await callTunnel(env, JSON.stringify(anthropicBody), headers);
+  if ("error" in upstream) return jsonResponse(502, { error: { type: "upstream_unavailable", message: upstream.error } });
+
+  if (!upstream.ok) {
+    // Forward Anthropic errors verbatim — clients can decode either format.
+    return passThroughResponse(upstream);
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  if (stream) {
+    if (!upstream.body) return jsonResponse(502, { error: { type: "upstream_unavailable", message: "no body" } });
+    const translated = anthropicSseToOpenaiSse(
+      upstream.body as unknown as ReadableStream<Uint8Array>,
+      openaiReq.model,
+      nowSec,
+    );
+    return new Response(
+      translated as unknown as ReadableStream<Uint8Array>,
+      { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } },
+    );
+  }
+
+  const anthResp = await upstream.json() as AnthropicMessageResponse;
+  return jsonResponse(200, anthropicToOpenai(anthResp, nowSec));
+}
+
 const handler = {
   __skipJwtVerify: false as boolean,
 
   async fetch(req: Request, env: Env, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(req.url);
-    if (req.method !== "POST" || url.pathname !== "/v1/messages") {
-      return jsonResponse(404, { error: { type: "not_found", message: "POST /v1/messages only" } });
+
+    // GET /v1/models is read-only; gated like everything else for simplicity.
+    if (req.method === "GET" && url.pathname === "/v1/models") {
+      const denied = await authorize(req, env, handler.__skipJwtVerify);
+      if (denied) return denied;
+      return jsonResponse(200, modelsList(Math.floor(Date.now() / 1000)));
     }
 
-    if (!handler.__skipJwtVerify) {
-      const jwt = req.headers.get("cf-access-jwt-assertion");
-      const bearer = req.headers.get("authorization");
-      const expectedBearer = env.PROXY_KEY ? `Bearer ${env.PROXY_KEY}` : null;
-      const bearerOk = expectedBearer !== null && bearer !== null && timingSafeEqual(bearer, expectedBearer);
-      if (jwt) {
-        try { await verifyAccessJwt(jwt, env); }
-        catch (e) {
-          return jsonResponse(403, { error: { type: "forbidden", message: `jwt invalid: ${(e as Error).message}` } });
-        }
-      } else if (!bearerOk) {
-        return jsonResponse(403, { error: { type: "forbidden", message: "missing access jwt or proxy bearer" } });
-      }
+    if (req.method !== "POST") {
+      return jsonResponse(404, { error: { type: "not_found", message: "POST /v1/messages, POST /v1/chat/completions, GET /v1/models, or POST /v1/embeddings" } });
     }
 
-    const fwdHeaders = new Headers();
-    for (const [k, v] of req.headers.entries()) {
-      if (FORWARD_HEADERS.has(k.toLowerCase())) fwdHeaders.set(k, v);
-    }
-    if (env.TUNNEL_ACCESS_CLIENT_ID && env.TUNNEL_ACCESS_CLIENT_SECRET) {
-      fwdHeaders.set("cf-access-client-id", env.TUNNEL_ACCESS_CLIENT_ID);
-      fwdHeaders.set("cf-access-client-secret", env.TUNNEL_ACCESS_CLIENT_SECRET);
-    }
-
-    let upstream: Awaited<ReturnType<typeof fetch>>;
-    try {
-      upstream = await fetch(`https://${env.TUNNEL_HOSTNAME}/v1/messages`, {
-        method: "POST",
-        headers: fwdHeaders,
-        body: req.body,
+    if (url.pathname === "/v1/embeddings") {
+      const denied = await authorize(req, env, handler.__skipJwtVerify);
+      if (denied) return denied;
+      return jsonResponse(501, {
+        error: {
+          type: "not_implemented",
+          message: "Anthropic does not provide embeddings via this API. Configure a separate provider (OpenAI text-embedding-3-*, Voyage, local Ollama, etc.) for embeddings.",
+        },
       });
-    } catch (e) {
-      return jsonResponse(502, { error: { type: "upstream_unavailable", message: (e as Error).message } });
     }
 
-    const outHeaders = new Headers();
-    for (const [k, v] of upstream.headers.entries()) {
-      if (HOP_BY_HOP.has(k.toLowerCase())) continue;
-      outHeaders.set(k, v);
+    if (url.pathname === "/v1/messages") {
+      const denied = await authorize(req, env, handler.__skipJwtVerify);
+      if (denied) return denied;
+      return handleAnthropicMessages(req, env);
     }
-    return new Response(
-      upstream.body as unknown as ReadableStream<Uint8Array> | null,
-      { status: upstream.status, headers: outHeaders },
-    );
+
+    if (url.pathname === "/v1/chat/completions") {
+      const denied = await authorize(req, env, handler.__skipJwtVerify);
+      if (denied) return denied;
+      return handleChatCompletions(req, env);
+    }
+
+    return jsonResponse(404, { error: { type: "not_found", message: "unknown route" } });
   },
 };
 

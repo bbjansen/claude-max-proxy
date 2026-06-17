@@ -1,9 +1,22 @@
 # claude-max-proxy
 
 Expose a **Claude Max consumer subscription** as a standard Anthropic
-`POST /v1/messages` endpoint, fronted by a Cloudflare Worker. Use any
-Anthropic-SDK-compatible client (Claude SDK, OpenRouter, your own scripts)
-against your Max plan instead of paying for separate API credits.
+`POST /v1/messages` endpoint — *and* as an OpenAI-compatible
+`POST /v1/chat/completions` endpoint — fronted by a Cloudflare Worker.
+Drop the Worker URL into any Anthropic or OpenAI SDK client and it just
+works against your Max plan instead of paid API credits.
+
+## Endpoints
+
+| Route | Format | Behavior |
+| --- | --- | --- |
+| `POST /v1/messages` | Anthropic | Pass-through to `api.anthropic.com/v1/messages`. Streaming SSE preserved. |
+| `POST /v1/chat/completions` | OpenAI | Translated to Anthropic, response translated back. Streaming SSE translated chunk-by-chunk. |
+| `GET  /v1/models` | OpenAI list | Static list of Claude models. |
+| `POST /v1/embeddings` | OpenAI | `501 not_implemented` — Anthropic has no embeddings endpoint. Configure a separate provider for embeddings. |
+
+All routes require either `Authorization: Bearer <PROXY_KEY>` or a
+Cloudflare Access JWT.
 
 > ⚠️ Using a consumer Max subscription as a programmatic API backend sits in
 > a gray area of Anthropic's ToS. Single-user, behind your own auth, is the
@@ -165,8 +178,34 @@ curl -X POST https://claude-max-proxy.<your-subdomain>.workers.dev/v1/messages \
   -d '{"model":"claude-haiku-4-5","max_tokens":64,"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-For SDK clients, set the Anthropic base URL to your Worker URL and pass the
-proxy key in `Authorization: Bearer …`.
+For Anthropic SDK clients, set the base URL to your Worker URL and pass the
+proxy key in `Authorization: Bearer …`. For OpenAI SDK clients, set the
+base URL to `https://<your-worker-host>/v1` and the API key to the proxy
+key — both `chat.completions.create` and the streaming variants work.
+
+```python
+# Anthropic SDK
+from anthropic import Anthropic
+client = Anthropic(api_key=PROXY_KEY, base_url="https://<host>")
+msg = client.messages.create(model="claude-haiku-4-5", max_tokens=64,
+                             messages=[{"role":"user","content":"hi"}])
+
+# OpenAI SDK pointed at the shim
+from openai import OpenAI
+client = OpenAI(api_key=PROXY_KEY, base_url="https://<host>/v1")
+resp = client.chat.completions.create(model="claude-haiku-4-5",
+                                      messages=[{"role":"user","content":"hi"}])
+```
+
+## Model quota
+
+On a Claude Max consumer subscription, the OAuth-backed API returns
+`rate_limit_error` for Opus and Sonnet models when the plan's quota is
+exhausted (which happens fast in heavy use); `claude-haiku-4-5` is the
+most-available choice. The model name list returned by `/v1/models`
+includes `claude-opus-4-8`, `claude-opus-4-7`, `claude-sonnet-4-6`, and
+`claude-haiku-4-5` — they all exist in the API; availability depends on
+the moment-to-moment quota state of the underlying account.
 
 ## Auth modes
 
