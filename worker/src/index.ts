@@ -41,6 +41,7 @@ const HOP_BY_HOP = new Set([
 const FORWARD_HEADERS = new Set([
   "accept",
   "content-type",
+  "x-account-hint",
 ]);
 
 const jwksCache = new Map<string, ReturnType<typeof jose.createRemoteJWKSet>>();

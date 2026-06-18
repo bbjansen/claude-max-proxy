@@ -178,6 +178,23 @@ describe("worker routing", () => {
     expect(h.get("anthropic-version")).toBeNull();
   });
 
+  it("forwards x-account-hint header to the tunnel", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("ok", { status: 200 }));
+    const req = new Request("https://w.example.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "cf-access-jwt-assertion": "stub",
+        "content-type": "application/json",
+        "x-account-hint": "bob@example.com",
+      },
+      body: "{}",
+    });
+    await worker.fetch(req, ENV_BASE as never, makeCtx());
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    const h = new Headers(init.headers as HeadersInit);
+    expect(h.get("x-account-hint")).toBe("bob@example.com");
+  });
+
   it("translates POST /v1/chat/completions non-streaming and forwards to tunnel as /v1/messages", async () => {
     fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({
       id: "msg_abc", type: "message", role: "assistant", model: "claude-haiku-4-5",
