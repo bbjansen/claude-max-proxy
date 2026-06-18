@@ -133,7 +133,9 @@ async function runServer(): Promise<void> {
 
   const server = createServer({
     pool,
-    upstream: (body, accept, p) => callUpstreamRotating(body, accept, p, {
+    upstream: (body, accept, p, accountHint, betaHeader) => callUpstreamRotating(body, accept, p, {
+      accountHint,
+      betaHeader,
       log: (msg, extra) => console.log(`[agent] ${msg}`, extra ?? ""),
     }),
   });

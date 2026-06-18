@@ -37,11 +37,14 @@ const HOP_BY_HOP = new Set([
 // Request headers we are willing to forward to the tunnel. `anthropic-version`
 // is intentionally NOT here: the agent always pins its own version on the
 // upstream call, so forwarding a client-supplied value would be silently
-// overridden and gives a false sense of control.
+// overridden and gives a false sense of control. `anthropic-beta` IS
+// forwarded so the agent can merge the client's requested betas (e.g.
+// context-management-2025-06-27) with the OAuth bearer beta it must add.
 const FORWARD_HEADERS = new Set([
   "accept",
   "content-type",
   "x-account-hint",
+  "anthropic-beta",
 ]);
 
 const jwksCache = new Map<string, ReturnType<typeof jose.createRemoteJWKSet>>();

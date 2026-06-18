@@ -4,7 +4,7 @@ import { handleAccountsSnapshot, handleAccountsDisable, handleAccountsEnable } f
 
 export interface ServerDeps {
   pool: AccountPool;
-  upstream: (body: Buffer, accept: string, pool: AccountPool, accountHint?: string | null) => Promise<Response>;
+  upstream: (body: Buffer, accept: string, pool: AccountPool, accountHint?: string | null, betaHeader?: string | null) => Promise<Response>;
 }
 
 const HOP_BY_HOP = new Set([
@@ -53,7 +53,8 @@ async function handleMessages(req: http.IncomingMessage, res: http.ServerRespons
   catch { return sendJson(res, 400, { error: { type: "invalid_request_error", message: "body is not valid JSON" } }); }
   const accept = pickHeader(req.headers["accept"]) ?? "application/json";
   const accountHint = pickHeader(req.headers["x-account-hint"]) ?? null;
-  const upstream = await deps.upstream(body, accept, deps.pool, accountHint);
+  const betaHeader = pickHeader(req.headers["anthropic-beta"]) ?? null;
+  const upstream = await deps.upstream(body, accept, deps.pool, accountHint, betaHeader);
   res.statusCode = upstream.status;
   for (const [k, v] of upstream.headers.entries()) {
     if (HOP_BY_HOP.has(k.toLowerCase())) continue;

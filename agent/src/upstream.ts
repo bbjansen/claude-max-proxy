@@ -16,6 +16,26 @@ interface RotatingOpts {
   nowMs?: () => number;
   log?: (msg: string, extra?: object) => void;
   accountHint?: string | null;
+  // Optional anthropic-beta header value from the inbound request. The agent
+  // merges this with its own required betas (OAuth bearer requires
+  // oauth-2025-04-20; Claude Code request handling requires
+  // claude-code-20250219), de-duped. Forwarding the inbound list lets Claude
+  // Code consumers opt into newer feature betas like
+  // context-management-2025-06-27 without code changes here.
+  betaHeader?: string | null;
+}
+
+const REQUIRED_BETAS = ["oauth-2025-04-20", "claude-code-20250219"];
+
+function mergeBetas(inbound: string | null | undefined): string {
+  const set = new Set<string>(REQUIRED_BETAS);
+  if (inbound) {
+    for (const b of inbound.split(",")) {
+      const trimmed = b.trim();
+      if (trimmed) set.add(trimmed);
+    }
+  }
+  return [...set].join(",");
 }
 
 export async function callUpstream(
@@ -61,6 +81,7 @@ export async function callUpstreamRotating(
   const tried: string[] = [];
   let lastResponse: Response | null = null;
   const initialHint = opts.accountHint ?? null;
+  const betaHeader = mergeBetas(opts.betaHeader);
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const hint = attempt === 0 ? initialHint : null;
@@ -71,7 +92,7 @@ export async function callUpstreamRotating(
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
-        "anthropic-beta": "oauth-2025-04-20,claude-code-20250219",
+        "anthropic-beta": betaHeader,
         "anthropic-version": "2023-06-01",
         "x-app": "cli",
         "content-type": "application/json",
