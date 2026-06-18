@@ -128,7 +128,7 @@ describe("callUpstreamRotating", () => {
   });
 
   it("caps at 3 total attempts and returns the last 429 to the client", async () => {
-    fetchMock.mockResolvedValue(new Response(
+    fetchMock.mockImplementation(async () => new Response(
       JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "" } }),
       { status: 429, headers: { "retry-after": "60", "content-type": "application/json" } },
     ));
