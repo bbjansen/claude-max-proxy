@@ -81,3 +81,77 @@ describe("AccountPool", () => {
     expect(p.accounts()).toEqual(["a@x", "b@y", "c@z"]);
   });
 });
+
+describe("AccountPool — admin surface", () => {
+  const NOW = 1_700_000_000_000;
+  const clock = () => NOW;
+  const A = { acctId: "a@x", manager: fakeManager("tok-A") };
+  const B = { acctId: "b@y", manager: fakeManager("tok-B") };
+
+  it("setManuallyDisabled / isManuallyDisabled flip atomically", () => {
+    const p = new AccountPool([A, B], { clock });
+    expect(p.isManuallyDisabled("a@x")).toBe(false);
+    p.setManuallyDisabled("a@x", true);
+    expect(p.isManuallyDisabled("a@x")).toBe(true);
+    p.setManuallyDisabled("a@x", false);
+    expect(p.isManuallyDisabled("a@x")).toBe(false);
+  });
+
+  it("selector skips manually disabled accounts on every tier", async () => {
+    const p = new AccountPool([A, B], { clock });
+    p.setManuallyDisabled("a@x", true);
+    const picks = [];
+    for (let i = 0; i < 3; i++) picks.push((await p.pickToken("haiku")).acctId);
+    expect(picks).toEqual(["b@y", "b@y", "b@y"]);
+  });
+
+  it("manually-disabled accounts are NOT used in the all-cooled fallback", async () => {
+    const p = new AccountPool([A, B], { clock });
+    p.setManuallyDisabled("a@x", true);
+    p.markCooldown("b@y", "opus", NOW + 30 * 60_000);
+    const pick = await p.pickToken("opus");
+    expect(pick.acctId).toBe("b@y");
+  });
+
+  it("upsertAccount adds a fresh account into the rotation", async () => {
+    const p = new AccountPool([A], { clock });
+    p.upsertAccount("b@y", fakeManager("tok-B-new"));
+    expect(p.accounts()).toEqual(["a@x", "b@y"]);
+    const first  = await p.pickToken("opus");
+    const second = await p.pickToken("opus");
+    expect([first.acctId, second.acctId]).toEqual(["a@x", "b@y"]);
+  });
+
+  it("removeAccount drops the entry and its cooldown / disabled state", async () => {
+    const p = new AccountPool([A, B], { clock });
+    p.markCooldown("a@x", "opus", NOW + 60_000);
+    p.setManuallyDisabled("a@x", true);
+    p.removeAccount("a@x");
+    expect(p.accounts()).toEqual(["b@y"]);
+    expect(p.isManuallyDisabled("a@x")).toBe(false);
+    const pick = await p.pickToken("opus");
+    expect(pick.acctId).toBe("b@y");
+  });
+
+  it("getManager surfaces the TokenManager for KeychainWatcher", () => {
+    const p = new AccountPool([A], { clock });
+    expect(p.getManager("a@x")).toBe(A.manager);
+    expect(p.getManager("missing@x")).toBeUndefined();
+  });
+
+  it("snapshot reflects cooldown, disabled flag, and last-used time", async () => {
+    const p = new AccountPool([A, B], { clock });
+    p.markCooldown("a@x", "opus", NOW + 5 * 60_000);
+    p.setManuallyDisabled("b@y", true);
+    await p.pickToken("haiku");
+    const snap = p.snapshot();
+    expect(snap.nowMs).toBe(NOW);
+    const a = snap.accounts.find(x => x.acctId === "a@x")!;
+    const b = snap.accounts.find(x => x.acctId === "b@y")!;
+    expect(a.cooldown.opus).toEqual({ untilMs: NOW + 5 * 60_000, remainingS: 300 });
+    expect(a.cooldown.sonnet).toBeNull();
+    expect(a.lastUsedMs).toBe(NOW);
+    expect(b.manuallyDisabled).toBe(true);
+    expect(b.lastUsedMs).toBeNull();
+  });
+});
