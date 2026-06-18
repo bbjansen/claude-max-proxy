@@ -90,10 +90,15 @@ async function authorize(req: Request, env: Env, skip: boolean): Promise<Respons
     try { await verifyAccessJwt(jwt, env); return null; }
     catch (e) { return jsonResponse(403, { error: { type: "forbidden", message: `jwt invalid: ${(e as Error).message}` } }); }
   }
-  const presented = extractBearerCredential(req.headers.get("authorization"));
+  // Accept the proxy key via either Authorization: Bearer <key> (OpenAI-style
+  // clients) or x-api-key: <key> (Anthropic-native clients). Both compare
+  // against PROXY_KEY in constant time.
   const expected = env.PROXY_KEY ?? null;
-  const bearerOk = expected !== null && presented !== null && timingSafeEqual(presented, expected);
-  if (!bearerOk) return jsonResponse(403, { error: { type: "forbidden", message: "missing access jwt or proxy bearer" } });
+  const fromBearer = extractBearerCredential(req.headers.get("authorization"));
+  const fromXApiKey = req.headers.get("x-api-key");
+  const presented = fromBearer ?? fromXApiKey;
+  const ok = expected !== null && presented !== null && timingSafeEqual(presented, expected);
+  if (!ok) return jsonResponse(403, { error: { type: "forbidden", message: "missing access jwt, proxy bearer, or x-api-key" } });
   return null;
 }
 
