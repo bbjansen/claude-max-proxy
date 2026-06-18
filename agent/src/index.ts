@@ -18,8 +18,9 @@ import type { AccountId, OAuthCredential } from "./types.js";
 const PORT = Number(process.env.PORT ?? 8787);
 const HOST = process.env.HOST ?? "127.0.0.1";
 const LOCK_PATH = path.join(os.homedir(), ".claude", ".proxy-refresh.lock");
-const NEW_SERVICE = "claude-max-proxy-credentials";
-const OLD_SERVICE = "Claude Code-credentials";
+const NEW_SERVICE = "claudette-credentials";
+const PRIMARY_OLD_SERVICE = "Claude Code-credentials";
+const SECONDARY_OLD_SERVICE = "claude-max-proxy-credentials";
 
 function allowlistFromEnv(): Set<AccountId> | null {
   const raw = process.env.CLAUDE_MAX_ACCOUNTS;
@@ -77,29 +78,33 @@ function makeManager(acctId: AccountId): TokenManager {
   );
 }
 
+async function readOldServiceCredential(service: string, acctId: AccountId): Promise<OAuthCredential | null> {
+  const r = await runSecurity(["find-generic-password", "-s", service, "-a", acctId, "-w"]);
+  if (r.code !== 0) return null;
+  try {
+    const j = JSON.parse(r.stdout.trim()) as { claudeAiOauth?: Record<string, unknown> } | null;
+    const o = j?.claudeAiOauth;
+    if (!o || typeof o.accessToken !== "string" || typeof o.refreshToken !== "string" || typeof o.expiresAt !== "number") return null;
+    const scopes = Array.isArray(o.scopes)
+      ? (o.scopes as unknown[]).filter((s): s is string => typeof s === "string")
+      : [];
+    return {
+      accessToken: o.accessToken,
+      refreshToken: o.refreshToken,
+      expiresAt: o.expiresAt,
+      scopes,
+    };
+  } catch { return null; }
+}
+
 async function migrateLegacyService(): Promise<void> {
   await runMigrationOnce({
-    listOld: () => listKeychainAccounts(OLD_SERVICE),
-    readOld: async (acctId): Promise<OAuthCredential | null> => {
-      const r = await runSecurity(["find-generic-password", "-s", OLD_SERVICE, "-a", acctId, "-w"]);
-      if (r.code !== 0) return null;
-      try {
-        const j = JSON.parse(r.stdout.trim()) as { claudeAiOauth?: Record<string, unknown> } | null;
-        const o = j?.claudeAiOauth;
-        if (!o || typeof o.accessToken !== "string" || typeof o.refreshToken !== "string" || typeof o.expiresAt !== "number") return null;
-        const scopes = Array.isArray(o.scopes)
-          ? (o.scopes as unknown[]).filter((s): s is string => typeof s === "string")
-          : [];
-        return {
-          accessToken: o.accessToken,
-          refreshToken: o.refreshToken,
-          expiresAt: o.expiresAt,
-          scopes,
-        };
-      } catch { return null; }
-    },
+    listOld: () => listKeychainAccounts(PRIMARY_OLD_SERVICE),
+    readOld: (acctId) => readOldServiceCredential(PRIMARY_OLD_SERVICE, acctId),
     listNew: () => listKeychainAccounts(NEW_SERVICE),
     writeNew: async (acctId, cred) => { await new KeychainStore(acctId).write(cred); },
+    secondaryListOld: () => listKeychainAccounts(SECONDARY_OLD_SERVICE),
+    secondaryReadOld: (acctId) => readOldServiceCredential(SECONDARY_OLD_SERVICE, acctId),
     log: (m) => console.log(m),
   });
 }
