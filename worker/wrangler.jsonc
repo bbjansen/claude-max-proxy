@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "claudette",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "vars": {
+    "TUNNEL_HOSTNAME": "claudette-agent.<your-zone>",
+    "ACCESS_TEAM_DOMAIN": "<your-team>.cloudflareaccess.com"
+  }
+  // Secrets (set via `wrangler secret put`):
+  //   PROXY_KEY                    — shared bearer for inbound auth (simplest)
+  //   ACCESS_AUD                   — Application Audience tag (when fronting with CF Access SSO)
+  //   TUNNEL_ACCESS_CLIENT_ID      — service token client ID for the Tunnel hostname (optional)
+  //   TUNNEL_ACCESS_CLIENT_SECRET  — service token secret for the Tunnel hostname (optional)
+}

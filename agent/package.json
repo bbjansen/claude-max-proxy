@@ -1,0 +1,26 @@
+{
+  "name": "@claudette/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "dev": "tsx src/index.ts"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "proper-lockfile": "4.1.2"
+  },
+  "devDependencies": {
+    "@types/node": "20.11.30",
+    "@types/proper-lockfile": "4.1.4",
+    "tsx": "4.7.1",
+    "typescript": "5.3.3",
+    "vitest": "1.4.0"
+  }
+}
