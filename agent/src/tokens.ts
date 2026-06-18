@@ -6,7 +6,7 @@ import { lock as lockfile } from "proper-lockfile";
 import type { AcquireLock, CredentialStore, OAuthCredential, RefreshClient } from "./types.js";
 
 const REFRESH_THRESHOLD_MS = 60_000;
-const KEYCHAIN_SERVICE = "claude-max-proxy-credentials";
+const KEYCHAIN_SERVICE = "claudette-credentials";
 const REFRESH_URL = "https://platform.claude.com/v1/oauth/token";
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const DEFAULT_EXPIRES_IN_S = 8 * 3600;
