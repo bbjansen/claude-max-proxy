@@ -4,6 +4,12 @@ import { modelTierOf, retryAfterMs } from "./tier.js";
 
 const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
 const MAX_ATTEMPTS_DEFAULT = 3;
+// A 401 from Anthropic means the OAuth refresh chain for this account is
+// broken (revoked refresh token, IdP-side invalidation, etc.). Pull the
+// account out of rotation for long enough that bursts of traffic don't
+// keep hitting it, but not so long that an OAuth-recovery via re-login is
+// invisible. 15 min matches typical Anthropic refresh propagation.
+const COOLDOWN_401_MS = 15 * 60 * 1000;
 
 interface RotatingOpts {
   maxAttempts?: number;
@@ -74,6 +80,13 @@ export async function callUpstreamRotating(
       },
       body,
     });
+
+    if (res.status === 401) {
+      pool.markCooldown(acctId, tier, nowMs() + COOLDOWN_401_MS);
+      log("upstream: 401; cooled and rotating", { acctId, tier, cooldownMs: COOLDOWN_401_MS });
+      lastResponse = res;
+      continue;
+    }
 
     if (res.status !== 429) {
       log("upstream: response", { acctId, tier, status: res.status });

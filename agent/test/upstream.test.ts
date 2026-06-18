@@ -144,13 +144,51 @@ describe("callUpstreamRotating", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
-  it("does not fail over on non-429 errors (4xx / 5xx pass through)", async () => {
+  it("does not fail over on non-{401,429} errors (other 4xx / 5xx pass through)", async () => {
     fetchMock.mockResolvedValueOnce(new Response("oops", { status: 500 }));
     const pool = poolOf({ acctId: "a@x", token: "tok-A" }, { acctId: "b@y", token: "tok-B" });
     const body = Buffer.from(JSON.stringify({ model: "claude-haiku-4-5" }));
     const res = await callUpstreamRotating(body, "application/json", pool);
     expect(res.status).toBe(500);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("on 401 from account A, cools A for 15min and rotates to account B", async () => {
+    fetchMock
+      .mockResolvedValueOnce(new Response("nope", { status: 401 }))
+      .mockResolvedValueOnce(new Response("ok", { status: 200 }));
+    const cooldownCalls: Array<{ acctId: string; tier: string; until: number }> = [];
+    const acctIds = ["a@x", "b@y"];
+    const pool = {
+      pickToken: async (tier: string, exclude: string[]) => ({
+        acctId: acctIds[exclude.length] ?? "a@x",
+        token: `tok-${acctIds[exclude.length] ?? "a@x"}`,
+      }),
+      markCooldown: (acctId: string, tier: string, until: number) => { cooldownCalls.push({ acctId, tier, until }); },
+      accounts: () => acctIds,
+    } as unknown as AccountPool;
+
+    const body = Buffer.from(JSON.stringify({ model: "claude-haiku-4-5" }));
+    const res = await callUpstreamRotating(body, "application/json", pool, { nowMs: () => 1_700_000_000_000 });
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(cooldownCalls).toHaveLength(1);
+    expect(cooldownCalls[0]!.acctId).toBe("a@x");
+    expect(cooldownCalls[0]!.tier).toBe("haiku");
+    expect(cooldownCalls[0]!.until - 1_700_000_000_000).toBe(15 * 60 * 1000);
+  });
+
+  it("returns the final 401 to caller when every account 401s within attempt cap", async () => {
+    fetchMock.mockImplementation(async () => new Response("nope", { status: 401 }));
+    const pool = poolOf(
+      { acctId: "a@x", token: "tok-A" },
+      { acctId: "b@y", token: "tok-B" },
+      { acctId: "c@z", token: "tok-C" },
+    );
+    const body = Buffer.from(JSON.stringify({ model: "claude-haiku-4-5" }));
+    const res = await callUpstreamRotating(body, "application/json", pool);
+    expect(res.status).toBe(401);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("forwards accountHint to pool.pickToken on the first attempt only", async () => {
