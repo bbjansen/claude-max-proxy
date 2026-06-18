@@ -15,3 +15,6 @@ export interface RefreshClient {
 }
 
 export type AcquireLock = () => Promise<() => Promise<void>>;
+
+export type AccountId = string;
+export type ModelTier = "opus" | "sonnet" | "haiku" | "other";
