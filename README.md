@@ -195,7 +195,7 @@ provides a stable public URL with edge auth.
 
 **Does this break interactive Claude Code on the same Mac?**
 No. claudette stores its tokens under a separate Keychain service
-(`claude-max-proxy-credentials`); the Claude Code CLI keeps using
+(`claudette-credentials`); the Claude Code CLI keeps using
 `Claude Code-credentials` and refreshes independently.
 
 **What if Anthropic rate-limits a model on one account?**
