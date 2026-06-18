@@ -152,4 +152,46 @@ describe("callUpstreamRotating", () => {
     expect(res.status).toBe(500);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it("forwards accountHint to pool.pickToken on the first attempt only", async () => {
+    fetchMock.mockImplementation(async () => new Response("ok", { status: 200 }));
+    const acctIds = ["a@x", "b@y"];
+    const calls: Array<{ tier: string; exclude: string[]; hint: string | null }> = [];
+    const pool = {
+      pickToken: async (tier: string, exclude: string[], hint: string | null = null) => {
+        calls.push({ tier, exclude: [...exclude], hint });
+        return { acctId: acctIds[exclude.length] ?? "a@x", token: "t" };
+      },
+      markCooldown: () => {},
+      accounts: () => acctIds,
+    } as unknown as AccountPool;
+
+    const body = Buffer.from(JSON.stringify({ model: "claude-haiku-4-5" }));
+    await callUpstreamRotating(body, "application/json", pool, { accountHint: "b@y" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.hint).toBe("b@y");
+  });
+
+  it("drops accountHint on 429 retry", async () => {
+    fetchMock.mockImplementation(async () => new Response(
+      JSON.stringify({ type: "error", error: { type: "rate_limit_error", message: "" } }),
+      { status: 429, headers: { "retry-after": "60", "content-type": "application/json" } },
+    ));
+    const acctIds = ["a@x", "b@y", "c@z"];
+    const calls: Array<{ hint: string | null }> = [];
+    const pool = {
+      pickToken: async (_tier: string, exclude: string[], hint: string | null = null) => {
+        calls.push({ hint });
+        return { acctId: acctIds[exclude.length] ?? "a@x", token: "t" };
+      },
+      markCooldown: () => {},
+      accounts: () => acctIds,
+    } as unknown as AccountPool;
+
+    const body = Buffer.from(JSON.stringify({ model: "claude-haiku-4-5" }));
+    await callUpstreamRotating(body, "application/json", pool, { accountHint: "b@y" });
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(calls[0]!.hint).toBe("b@y");
+    expect(calls[1]!.hint).toBeNull();
+  });
 });

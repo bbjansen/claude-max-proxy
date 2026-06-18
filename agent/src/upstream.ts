@@ -9,6 +9,7 @@ interface RotatingOpts {
   maxAttempts?: number;
   nowMs?: () => number;
   log?: (msg: string, extra?: object) => void;
+  accountHint?: string | null;
 }
 
 export async function callUpstream(
@@ -53,9 +54,11 @@ export async function callUpstreamRotating(
 
   const tried: string[] = [];
   let lastResponse: Response | null = null;
+  const initialHint = opts.accountHint ?? null;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const { acctId, token } = await pool.pickToken(tier, tried);
+    const hint = attempt === 0 ? initialHint : null;
+    const { acctId, token } = await pool.pickToken(tier, tried, hint);
     tried.push(acctId);
 
     const res = await fetch(ANTHROPIC_URL, {
