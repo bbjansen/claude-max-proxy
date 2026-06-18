@@ -84,4 +84,34 @@ describe("createServer", () => {
       expect(r.status).toBe(404);
     } finally { server.close(); }
   });
+
+  it("reads x-account-hint header and passes it to upstream", async () => {
+    const pool = poolWith({ acctId: "a@x", token: "tA" });
+    const seen: Array<string | null | undefined> = [];
+    const upstream = vi.fn(async (_body: Buffer, _accept: string, _p: AccountPool, hint?: string | null) => {
+      seen.push(hint);
+      return new Response("ok", { status: 200 });
+    });
+    const { server, url } = await startServer({ pool, upstream });
+    try {
+      await post(`${url}/v1/messages`, JSON.stringify({ model: "claude-haiku-4-5" }), {
+        "X-Account-Hint": "b@y",
+      });
+      expect(seen).toEqual(["b@y"]);
+    } finally { server.close(); }
+  });
+
+  it("passes null when x-account-hint header is absent", async () => {
+    const pool = poolWith({ acctId: "a@x", token: "tA" });
+    const seen: Array<string | null | undefined> = [];
+    const upstream = vi.fn(async (_body: Buffer, _accept: string, _p: AccountPool, hint?: string | null) => {
+      seen.push(hint ?? null);
+      return new Response("ok", { status: 200 });
+    });
+    const { server, url } = await startServer({ pool, upstream });
+    try {
+      await post(`${url}/v1/messages`, JSON.stringify({ model: "claude-haiku-4-5" }));
+      expect(seen).toEqual([null]);
+    } finally { server.close(); }
+  });
 });
