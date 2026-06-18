@@ -41,6 +41,13 @@ export class TokenManager {
     return this.cached.accessToken;
   }
 
+  // Replace the in-memory cached credential without touching the store or the
+  // refresher. Used by KeychainWatcher when a peer process (interactive Claude
+  // Code) rotates the token and writes a newer credential to Keychain.
+  adoptExternalCredential(cred: OAuthCredential): void {
+    this.cached = cred;
+  }
+
   private async refreshShared(force: boolean): Promise<OAuthCredential> {
     if (this.inflightForced) return this.inflightForced;
     if (!force && this.inflightAny) return this.inflightAny;

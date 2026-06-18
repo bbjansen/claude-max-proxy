@@ -179,4 +179,24 @@ describe("TokenManager", () => {
     expect(b).toBe("sk-ant-oat01-FORCED");
     expect(refresher.refresh).toHaveBeenCalled();
   });
+
+  it("adoptExternalCredential swaps the cache without calling the refresher", async () => {
+    const cred = { ...baseCred, expiresAt: now + 10 * 60_000 };
+    const newer: OAuthCredential = {
+      accessToken: "sk-ant-oat01-EXTERNAL",
+      refreshToken: "sk-ant-ort01-EXTERNAL",
+      expiresAt: now + 8 * 3_600_000,
+      scopes: ["user:inference"],
+    };
+    const { store } = makeStore(cred);
+    const refresher = makeRefresher(newer);
+    const tm = new TokenManager(store, refresher, noopLock(), clock);
+
+    await tm.getAccessToken(); // warm cache to `cred`
+    tm.adoptExternalCredential(newer);
+
+    expect(await tm.getAccessToken()).toBe("sk-ant-oat01-EXTERNAL");
+    expect(refresher.refresh).not.toHaveBeenCalled();
+    expect(store.read).toHaveBeenCalledTimes(1);
+  });
 });
