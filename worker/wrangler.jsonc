@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
   "vars": {
-    "TUNNEL_HOSTNAME": "claudette-agent.<your-zone>",
+    "TUNNEL_HOSTNAME": "claudette-agent.bobjansen.dev",
     "ACCESS_TEAM_DOMAIN": "<your-team>.cloudflareaccess.com"
   }
   // Secrets (set via `wrangler secret put`):
