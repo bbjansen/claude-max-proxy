@@ -155,3 +155,50 @@ describe("AccountPool — admin surface", () => {
     expect(b.lastUsedMs).toBeNull();
   });
 });
+
+describe("AccountPool — pickToken hint", () => {
+  const NOW = 1_700_000_000_000;
+  const clock = () => NOW;
+  const A = { acctId: "a@x", manager: fakeManager("tok-A") };
+  const B = { acctId: "b@y", manager: fakeManager("tok-B") };
+  const C = { acctId: "c@z", manager: fakeManager("tok-C") };
+
+  it("honors a valid hint (not cooled, not disabled, in pool)", async () => {
+    const p = new AccountPool([A, B, C], { clock });
+    const pick = await p.pickToken("opus", [], "c@z");
+    expect(pick.acctId).toBe("c@z");
+  });
+
+  it("does not advance nextIdx when honoring a hint", async () => {
+    const p = new AccountPool([A, B, C], { clock });
+    await p.pickToken("opus", [], "c@z");
+    const next = await p.pickToken("opus");
+    expect(next.acctId).toBe("a@x");
+  });
+
+  it("ignores the hint when the hinted account is cooled for the tier", async () => {
+    const p = new AccountPool([A, B, C], { clock });
+    p.markCooldown("c@z", "opus", NOW + 60_000);
+    const pick = await p.pickToken("opus", [], "c@z");
+    expect(pick.acctId).toBe("a@x");
+  });
+
+  it("ignores the hint when the hinted account is manually disabled", async () => {
+    const p = new AccountPool([A, B, C], { clock });
+    p.setManuallyDisabled("c@z", true);
+    const pick = await p.pickToken("opus", [], "c@z");
+    expect(pick.acctId).toBe("a@x");
+  });
+
+  it("ignores the hint when the hinted account is unknown", async () => {
+    const p = new AccountPool([A, B, C], { clock });
+    const pick = await p.pickToken("opus", [], "ghost@x");
+    expect(pick.acctId).toBe("a@x");
+  });
+
+  it("ignores the hint when the hinted account is in exclude", async () => {
+    const p = new AccountPool([A, B, C], { clock });
+    const pick = await p.pickToken("opus", ["c@z"], "c@z");
+    expect(pick.acctId).toBe("a@x");
+  });
+});

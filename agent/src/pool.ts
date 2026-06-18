@@ -73,7 +73,7 @@ export class AccountPool {
     else this.nextIdx = 0;
   }
 
-  async pickToken(tier: ModelTier, exclude: AccountId[] = []): Promise<{ acctId: AccountId; token: string }> {
+  async pickToken(tier: ModelTier, exclude: AccountId[] = [], hint: AccountId | null = null): Promise<{ acctId: AccountId; token: string }> {
     const order = this.accounts();
     if (order.length === 0) throw new Error("AccountPool is empty");
 
@@ -82,6 +82,17 @@ export class AccountPool {
     if (eligible.length === 0) throw new Error("no eligible account after applying exclude list / disabled flags");
 
     const now = this.clock();
+
+    // Honor a valid hint as a non-rotating preference (doesn't advance nextIdx).
+    if (hint !== null
+        && this.managers.has(hint)
+        && !excludeSet.has(hint)
+        && !this.disabled.has(hint)) {
+      const hintUntil = this.cooldown.get(hint)?.get(tier) ?? 0;
+      if (hintUntil <= now) {
+        return this.use(hint, now);
+      }
+    }
 
     for (let i = 0; i < order.length; i++) {
       const idx = (this.nextIdx + i) % order.length;
