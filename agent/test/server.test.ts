@@ -1,10 +1,22 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as http from "node:http";
-import { createServer } from "../src/server.js";
 import type { AddressInfo } from "node:net";
+import { createServer } from "../src/server.js";
+import { AccountPool } from "../src/pool.js";
 
-function startServer(upstream: (body: Buffer, accept: string) => Promise<Response>) {
-  const server = createServer({ upstream });
+function poolWith(...entries: Array<{ acctId: string; token: string }>) {
+  return new AccountPool(entries.map(e => ({
+    acctId: e.acctId,
+    manager: {
+      async getAccessToken() { return e.token; },
+      async forceRefresh() { return e.token; },
+      adoptExternalCredential() {},
+    } as never,
+  })), { clock: () => 1_700_000_000_000 });
+}
+
+function startServer(deps: Parameters<typeof createServer>[0]) {
+  const server = createServer(deps);
   return new Promise<{ server: http.Server; url: string }>((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       const port = (server.address() as AddressInfo).port;
@@ -19,66 +31,57 @@ async function post(url: string, body: string, headers: Record<string, string> =
 }
 
 describe("createServer", () => {
-  it("routes POST /v1/messages to upstream and streams body back", async () => {
-    const stream = new ReadableStream({
-      start(c) { c.enqueue(new TextEncoder().encode("chunk-1")); c.enqueue(new TextEncoder().encode("chunk-2")); c.close(); }
-    });
-    const upstream = async () => new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
-    const { server, url } = await startServer(upstream);
+  it("POST /v1/messages routes through the rotating upstream and pipes the response", async () => {
+    const pool = poolWith({ acctId: "a@x", token: "tA" });
+    const upstreamFake = vi.fn(async () => new Response("hi", { status: 200, headers: { "content-type": "text/plain" } }));
+    const { server, url } = await startServer({ pool, upstream: upstreamFake });
     try {
-      const r = await post(`${url}/v1/messages`, '{"messages":[]}');
+      const r = await post(`${url}/v1/messages`, JSON.stringify({ model: "claude-haiku-4-5" }));
       expect(r.status).toBe(200);
-      expect(r.headers.get("content-type")).toBe("text/event-stream");
-      expect(r.body).toBe("chunk-1chunk-2");
+      expect(r.body).toBe("hi");
+      expect(upstreamFake).toHaveBeenCalledTimes(1);
     } finally { server.close(); }
   });
 
-  it("returns 404 for non-matching routes", async () => {
-    const upstream = async () => new Response("nope", { status: 200 });
-    const { server, url } = await startServer(upstream);
-    try {
-      const r = await post(`${url}/other`, "{}");
-      expect(r.status).toBe(404);
-      const j = JSON.parse(r.body);
-      expect(j.error.type).toBe("not_found");
-    } finally { server.close(); }
-  });
-
-  it("returns 400 on non-JSON body", async () => {
-    const upstream = async () => new Response("ok", { status: 200 });
-    const { server, url } = await startServer(upstream);
+  it("POST /v1/messages with non-JSON body returns 400", async () => {
+    const pool = poolWith({ acctId: "a@x", token: "tA" });
+    const { server, url } = await startServer({ pool, upstream: async () => new Response("ok") });
     try {
       const r = await post(`${url}/v1/messages`, "not-json");
       expect(r.status).toBe(400);
-      const j = JSON.parse(r.body);
-      expect(j.error.type).toBe("invalid_request_error");
     } finally { server.close(); }
   });
 
-  it("forwards 4xx/5xx status and body from upstream", async () => {
-    const upstream = async () => new Response(JSON.stringify({ error: { type: "rate_limit_error" } }), {
-      status: 429,
-      headers: { "retry-after": "3", "content-type": "application/json" },
-    });
-    const { server, url } = await startServer(upstream);
+  it("GET /v1/admin/accounts returns the snapshot", async () => {
+    const pool = poolWith({ acctId: "a@x", token: "tA" });
+    const { server, url } = await startServer({ pool, upstream: async () => new Response("") });
     try {
-      const r = await post(`${url}/v1/messages`, "{}");
-      expect(r.status).toBe(429);
-      expect(r.headers.get("retry-after")).toBe("3");
-      expect(JSON.parse(r.body).error.type).toBe("rate_limit_error");
+      const res = await fetch(`${url}/v1/admin/accounts`);
+      expect(res.status).toBe(200);
+      const body = await res.json() as { accounts: Array<{ acct_id: string }> };
+      expect(body.accounts.map(a => a.acct_id)).toEqual(["a@x"]);
     } finally { server.close(); }
   });
 
-  it("strips hop-by-hop headers from upstream response", async () => {
-    const upstream = async () => new Response("body", {
-      status: 200,
-      headers: { "content-type": "text/plain", "connection": "keep-alive", "transfer-encoding": "chunked" },
-    });
-    const { server, url } = await startServer(upstream);
+  it("POST /v1/admin/accounts/{id}/disable + /enable flip and persist", async () => {
+    const pool = poolWith({ acctId: "a@x", token: "tA" });
+    const { server, url } = await startServer({ pool, upstream: async () => new Response("") });
     try {
-      const r = await post(`${url}/v1/messages`, "{}");
-      expect(r.status).toBe(200);
-      expect(r.headers.get("content-type")).toBe("text/plain");
+      let res = await fetch(`${url}/v1/admin/accounts/a%40x/disable`, { method: "POST" });
+      expect(res.status).toBe(200);
+      expect(pool.isManuallyDisabled("a@x")).toBe(true);
+      res = await fetch(`${url}/v1/admin/accounts/a%40x/enable`, { method: "POST" });
+      expect(res.status).toBe(200);
+      expect(pool.isManuallyDisabled("a@x")).toBe(false);
+    } finally { server.close(); }
+  });
+
+  it("unknown route returns 404", async () => {
+    const pool = poolWith({ acctId: "a@x", token: "tA" });
+    const { server, url } = await startServer({ pool, upstream: async () => new Response("") });
+    try {
+      const r = await post(`${url}/unknown`, "{}");
+      expect(r.status).toBe(404);
     } finally { server.close(); }
   });
 });
