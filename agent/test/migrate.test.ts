@@ -55,3 +55,38 @@ describe("runMigrationOnce", () => {
     expect(logs.some(l => /migrated 2/.test(l))).toBe(true);
   });
 });
+
+describe("runMigrationOnce — chained secondary source", () => {
+  it("uses the secondary source when the primary returns zero entries", async () => {
+    const secondary = new Map([
+      ["x@s", cred("tX")],
+      ["y@s", cred("tY")],
+    ]);
+    const written: string[] = [];
+    const out = await runMigrationOnce({
+      listOld: async () => [],
+      readOld: async () => null,
+      listNew: async () => [],
+      writeNew: async (id) => { written.push(id); },
+      secondaryListOld: async () => [...secondary.keys()],
+      secondaryReadOld: async (id) => secondary.get(id) ?? null,
+    });
+    expect(out).toEqual({ migrated: 2, skipped: [] });
+    expect(written.sort()).toEqual(["x@s", "y@s"]);
+  });
+
+  it("does NOT consult the secondary source when the primary had entries", async () => {
+    const primary = new Map([["p@x", cred("tP")]]);
+    let secondaryCalled = false;
+    const out = await runMigrationOnce({
+      listOld: async () => [...primary.keys()],
+      readOld: async (id) => primary.get(id) ?? null,
+      listNew: async () => [],
+      writeNew: async () => {},
+      secondaryListOld: async () => { secondaryCalled = true; return []; },
+      secondaryReadOld: async () => null,
+    });
+    expect(out.migrated).toBe(1);
+    expect(secondaryCalled).toBe(false);
+  });
+});
