@@ -6,7 +6,7 @@ import { lock as lockfile } from "proper-lockfile";
 import type { AcquireLock, CredentialStore, OAuthCredential, RefreshClient } from "./types.js";
 
 const REFRESH_THRESHOLD_MS = 60_000;
-const KEYCHAIN_SERVICE = "Claude Code-credentials";
+const KEYCHAIN_SERVICE = "claude-max-proxy-credentials";
 const REFRESH_URL = "https://platform.claude.com/v1/oauth/token";
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const DEFAULT_EXPIRES_IN_S = 8 * 3600;
@@ -99,13 +99,17 @@ export class KeychainStore implements CredentialStore {
         scopes: cred.scopes,
       },
     });
-    // Pipe the secret via stdin instead of `-w <json>` so it never appears in
-    // argv (visible to `ps`, /proc/<pid>/cmdline, audit logs).
-    // `security add-generic-password -w` with no value reads the password from
-    // a TTY; when stdin is a pipe, it reads from there.
+    // We pass the JSON via -w "<value>" (argv) rather than via stdin. The
+    // alternative — `security add-generic-password -w` without a value —
+    // does NOT read the password from stdin even when one is piped: the
+    // binary requires a TTY in that mode and writes an empty entry when
+    // stdin is a pipe with no TTY (silent data loss, observed in practice).
+    // Argv visibility is a theoretical risk; this agent runs in the user's
+    // session so any local-user process can already access the Keychain it
+    // would target. The atomic write semantics matter more than the brief
+    // argv window.
     const { code, stderr } = await runSecurity(
-      ["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", this.account, "-w"],
-      json,
+      ["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", this.account, "-w", json],
     );
     if (code !== 0) throw new Error(`security write failed (exit ${code}): ${stderr.slice(0, 200)}`);
   }
