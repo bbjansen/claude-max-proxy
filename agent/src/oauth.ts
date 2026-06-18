@@ -1,4 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
+import * as http from "node:http";
+import type { AddressInfo } from "node:net";
 import type { OAuthCredential } from "./types.js";
 
 const DEFAULT_EXPIRES_IN_S = 8 * 3600;
@@ -70,4 +72,47 @@ export async function exchangeCodeForTokens(
     expiresAt: nowMs() + expiresIn * 1000,
     scopes: scope.split(" ").filter(Boolean),
   };
+}
+
+const CALLBACK_PATH = "/callback";
+const SUCCESS_HTML = "<html><body><h1>Login successful</h1><p>You can close this tab.</p></body></html>";
+
+export async function startCallbackServer(
+  expectedState: string,
+  opts: { port?: number } = {},
+): Promise<{ redirectUri: string; result: Promise<{ code: string }>; close: () => void }> {
+  let resolveResult!: (v: { code: string }) => void;
+  let rejectResult!: (e: Error) => void;
+  const result = new Promise<{ code: string }>((res, rej) => {
+    resolveResult = res; rejectResult = rej;
+  });
+
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (url.pathname !== CALLBACK_PATH) {
+      res.statusCode = 404;
+      res.end("not found");
+      return;
+    }
+    const code = url.searchParams.get("code") ?? "";
+    const state = url.searchParams.get("state") ?? "";
+    if (state !== expectedState) {
+      res.statusCode = 400;
+      res.end("OAuth state mismatch");
+      rejectResult(new Error("OAuth state mismatch"));
+      server.close();
+      return;
+    }
+    res.statusCode = 200;
+    res.setHeader("content-type", "text/html");
+    res.end(SUCCESS_HTML);
+    resolveResult({ code });
+    server.close();
+  });
+
+  await new Promise<void>((resolve) => server.listen(opts.port ?? 0, "127.0.0.1", () => resolve()));
+  const port = (server.address() as AddressInfo).port;
+  const redirectUri = `http://127.0.0.1:${port}${CALLBACK_PATH}`;
+  const close = () => { try { server.close(); } catch { /* ignore */ } };
+  return { redirectUri, result, close };
 }

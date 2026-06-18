@@ -4,6 +4,7 @@ import {
   generateState,
   buildAuthorizeUrl,
   exchangeCodeForTokens,
+  startCallbackServer,
   CLIENT_ID,
   AUTHORIZE_URL,
   SCOPES,
@@ -102,5 +103,66 @@ describe("exchangeCodeForTokens", () => {
     await expect(
       exchangeCodeForTokens("CODE", "V", "http://127.0.0.1/cb")
     ).rejects.toThrow(/access_token/);
+  });
+});
+
+describe("startCallbackServer", () => {
+  it("resolves with the code when the callback's state matches", async () => {
+    const srv = await startCallbackServer("EXPECTED");
+    try {
+      const u = new URL(srv.redirectUri);
+      u.searchParams.set("code", "the-code");
+      u.searchParams.set("state", "EXPECTED");
+      const r = await fetch(u.toString());
+      expect(r.status).toBe(200);
+      const out = await srv.result;
+      expect(out.code).toBe("the-code");
+    } finally {
+      srv.close();
+    }
+  });
+
+  it("rejects with a 400 on state mismatch", async () => {
+    const srv = await startCallbackServer("EXPECTED");
+    // Attach the rejection assertion BEFORE triggering the callback so the
+    // promise's catch handler is registered when the server rejects it.
+    const rejection = expect(srv.result).rejects.toThrow(/state mismatch/i);
+    try {
+      const u = new URL(srv.redirectUri);
+      u.searchParams.set("code", "x");
+      u.searchParams.set("state", "WRONG");
+      const r = await fetch(u.toString());
+      expect(r.status).toBe(400);
+      await rejection;
+    } finally {
+      srv.close();
+    }
+  });
+
+  it("returns 404 on non-/callback paths and keeps waiting", async () => {
+    const srv = await startCallbackServer("EXPECTED");
+    try {
+      const u = new URL(srv.redirectUri);
+      u.pathname = "/other";
+      const r = await fetch(u.toString());
+      expect(r.status).toBe(404);
+      const u2 = new URL(srv.redirectUri);
+      u2.searchParams.set("code", "c");
+      u2.searchParams.set("state", "EXPECTED");
+      await fetch(u2.toString());
+      await srv.result;
+    } finally {
+      srv.close();
+    }
+  });
+
+  it("binds to 127.0.0.1 with a random port when none requested", async () => {
+    const srv = await startCallbackServer("S", { port: 0 });
+    try {
+      const u = new URL(srv.redirectUri);
+      expect(u.hostname).toBe("127.0.0.1");
+      expect(Number(u.port)).toBeGreaterThan(0);
+      expect(u.pathname).toBe("/callback");
+    } finally { srv.close(); }
   });
 });
